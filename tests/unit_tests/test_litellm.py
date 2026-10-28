@@ -1433,33 +1433,63 @@ def test_client_params_forwards_api_key() -> None:
 # ── stream_options ─────────────────────────────────────────────────────────────
 
 
-def test_stream_options_set_for_non_openai_model() -> None:
-    """stream_options must be set for non-OpenAI providers too."""
-    llm = ChatLiteLLM(model="anthropic/claude-3-5-sonnet-20241022", api_key="fake")
-    _, params = llm._create_message_dicts([], None)
-    # Simulate what _stream does
-    params = {**params, "stream": True}
-    if llm.stream_options is not None:
-        params["stream_options"] = llm.stream_options
-    else:
-        params["stream_options"] = {"include_usage": True}
-    assert params.get("stream_options") == {"include_usage": True}
+_STREAM_OPTIONS = {"include_usage": True, "include_obfuscation": False}
 
 
-def test_stream_options_respected_when_set_explicitly() -> None:
-    """User-provided stream_options must not be overwritten."""
-    custom = {"include_usage": False}
-    llm = ChatLiteLLM(
-        model="anthropic/claude-3-5-sonnet-20241022",
-        api_key="fake",
-        stream_options=custom,
-    )
-    params = {}
-    if llm.stream_options is not None:
-        params["stream_options"] = llm.stream_options
-    else:
-        params["stream_options"] = {"include_usage": True}
-    assert params["stream_options"] == custom
+async def _no_chunks() -> Any:
+    return
+    yield
+
+
+@pytest.mark.parametrize("method", ["stream", "astream"])
+@pytest.mark.parametrize(
+    ("constructor", "call", "sent"),
+    [
+        ({}, {}, {"include_usage": True}),
+        ({"stream_options": _STREAM_OPTIONS}, {}, _STREAM_OPTIONS),
+        ({"model_kwargs": {"stream_options": _STREAM_OPTIONS}}, {}, _STREAM_OPTIONS),
+        ({}, {"stream_options": _STREAM_OPTIONS}, _STREAM_OPTIONS),
+        (
+            {
+                "stream_options": {"include_usage": True},
+                "model_kwargs": {"stream_options": _STREAM_OPTIONS},
+            },
+            {},
+            _STREAM_OPTIONS,
+        ),
+        (
+            {"model_kwargs": {"stream_options": {"include_usage": True}}},
+            {"stream_options": _STREAM_OPTIONS},
+            _STREAM_OPTIONS,
+        ),
+    ],
+    ids=[
+        "default",
+        "field",
+        "model_kwargs",
+        "per-call",
+        "model_kwargs-over-field",
+        "per-call-over-model_kwargs",
+    ],
+)
+async def test_stream_options_sent_from_each_source(
+    method: str, constructor: dict[str, Any], call: dict[str, Any], sent: Any
+) -> None:
+    """The default fills only a gap, so no source the caller used is overwritten."""
+    llm = ChatLiteLLM(model="gpt-4o-mini", **constructor)
+
+    with pytest.raises(ValueError, match="No generation chunks"):
+        if method == "stream":
+            with patch("litellm.completion", return_value=iter([])) as completion:
+                list(llm.stream("hi", **call))
+        else:
+            with patch(
+                "litellm.acompletion", AsyncMock(return_value=_no_chunks())
+            ) as completion:
+                async for _ in llm.astream("hi", **call):
+                    pass
+
+    assert completion.call_args.kwargs["stream_options"] == sent
 
 
 # ── tool_choice mapping with thinking enabled ──────────────────────────────────

@@ -1491,9 +1491,13 @@ class ChatLiteLLM(BaseChatModel):
 
     client: Any = None  #: :meta private:
     model: str = "gpt-3.5-turbo"
+    """Model name to use."""
     model_name: str | None = None
     stream_options: dict[str, Any] | None = None
-    """Model name to use."""
+    """``stream_options`` sent when streaming, ``{"include_usage": True}`` if unset.
+
+    A per-call ``stream_options`` wins over ``model_kwargs``, which wins over this.
+    """
     openai_api_key: str | None = Field(default=None, repr=False)
     azure_api_key: str | None = Field(default=None, repr=False)
     anthropic_api_key: str | None = Field(default=None, repr=False)
@@ -2107,7 +2111,8 @@ class ChatLiteLLM(BaseChatModel):
             params["previous_response_id"] = chained_response_id
         params = {**self._merge_call_params(params, kwargs), "stream": True}
         self._validate_chained_request(params)
-        if "stream_options" not in kwargs:
+        # `params` already holds the call kwargs and `model_kwargs`; either one wins.
+        if "stream_options" not in params:
             params["stream_options"] = (
                 self.stream_options
                 if self.stream_options is not None
@@ -2211,7 +2216,8 @@ class ChatLiteLLM(BaseChatModel):
             params["previous_response_id"] = chained_response_id
         params = {**self._merge_call_params(params, kwargs), "stream": True}
         self._validate_chained_request(params)
-        if "stream_options" not in kwargs:
+        # `params` already holds the call kwargs and `model_kwargs`; either one wins.
+        if "stream_options" not in params:
             params["stream_options"] = (
                 self.stream_options
                 if self.stream_options is not None
