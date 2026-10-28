@@ -1523,6 +1523,7 @@ _MANUAL_THINKING = [
         {"model": "anthropic/claude-sonnet-4-5", "reasoning_effort": "high"},
         {},
     ),
+    ("openai/gpt-4o", {"model": "anthropic/claude-sonnet-4-5", **_THINKING_KWARGS}, {}),
     pytest.param(
         "anthropic/claude-sonnet-4-5",
         {},
@@ -1538,6 +1539,7 @@ _MANUAL_THINKING_IDS = [
     "effort-bound",
     "manual-in-model-kwargs",
     "effort-for-the-model-kwargs-destination",
+    "manual-for-the-model-kwargs-destination",
     "bool-thinking-bound",
 ]
 
@@ -1568,6 +1570,53 @@ def test_bind_tools_downgraded_wherever_thinking_is_set(
         bound = llm.bind_tools([_dummy_tool], tool_choice="required", **bind_kwargs)
     assert bound.kwargs["tool_choice"] == "auto"  # type: ignore[attr-defined]
     assert "incompatible with thinking" in caplog.text
+
+
+@pytest.mark.parametrize("alias", ["fast", "gpt-4o"])
+@pytest.mark.parametrize(
+    "model_kwargs",
+    [_THINKING_KWARGS, {"reasoning_effort": "high"}],
+    ids=["manual", "effort"],
+)
+def test_bind_tools_downgrades_for_an_alias_of_claude(
+    alias: str,
+    model_kwargs: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """litellm swaps an alias in before it routes, so its name decides nothing.
+
+    Neither name says Claude, and litellm routes ``gpt-4o`` on its own.
+    """
+    monkeypatch.setitem(litellm.model_alias_map, alias, "anthropic/claude-sonnet-4-5")
+    llm = ChatLiteLLM(model=alias, api_key="fake", model_kwargs=model_kwargs)
+    with caplog.at_level(
+        logging.WARNING, logger="langchain_litellm.chat_models.litellm"
+    ):
+        bound = llm.bind_tools([_dummy_tool], tool_choice="required")
+    assert bound.kwargs["tool_choice"] == "auto"  # type: ignore[attr-defined]
+    assert "incompatible with thinking" in caplog.text
+
+
+def test_bind_tools_keeps_required_for_a_non_claude_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-claude alias must not downgrade a forced tool choice."""
+    monkeypatch.setitem(
+        litellm.model_alias_map,
+        "my-gpt-alias",
+        "openai/gpt-4o",
+    )
+
+    llm = ChatLiteLLM(
+        model="my-gpt-alias",
+        api_key="fake",
+        model_kwargs={"reasoning_effort": "high"},
+    )
+
+    bound = llm.bind_tools([_dummy_tool], tool_choice="required")
+
+    assert bound.kwargs["tool_choice"] == "required"  # type: ignore[attr-defined]
 
 
 @pytest.mark.skipif(

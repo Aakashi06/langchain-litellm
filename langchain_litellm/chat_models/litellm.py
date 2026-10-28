@@ -488,6 +488,11 @@ def _aliased(model: str | None) -> str | None:
     return aliases[model] if aliases and model in aliases else model
 
 
+def _is_claude(model: str | None) -> bool:
+    """Whether ``model`` names Claude once litellm's alias map has applied."""
+    return "claude" in (_aliased(model) or "").lower()
+
+
 def _only_endpoint(params: Mapping[str, Any], endpoint: str | None) -> str | None:
     """``endpoint``, unless something could answer this request from another one.
 
@@ -979,12 +984,14 @@ def _sends_manual_thinking(
     effort = params.get("reasoning_effort")
     if thinking is None and effort is None:
         return False
+    # litellm swaps an alias in before it resolves the provider.
+    model = _aliased(model) or model
     try:
         bare_model, provider, _, _ = litellm.get_llm_provider(
             model=model, custom_llm_provider=custom_llm_provider, api_base=api_base
         )
     except litellm.BadRequestError:
-        # An alias or routed name that litellm resolves only when the call is made.
+        # A routed name that litellm resolves only when the call is made.
         return False
     mapped = litellm.get_optional_params(
         model=bare_model,
@@ -1586,7 +1593,8 @@ class ChatLiteLLM(BaseChatModel):
         )
 
     def _is_claude_model(self) -> bool:
-        return "claude" in (self.model_name or self.model).lower()
+        model, _ = self._constructor_destination()
+        return _is_claude(model)
 
     @property
     def _default_params(self) -> dict[str, Any]:
