@@ -16,9 +16,10 @@ def _model(router: bool, **kwargs):
 
 @pytest.mark.parametrize("router", [False, True])
 @pytest.mark.parametrize("source", ["field", "model_kwargs", "call"])
-@pytest.mark.parametrize("streaming", [None, True])
-def test_multiple_choices_rejected_before_sync_request(router, source, streaming):
-    constructor = {} if streaming is None else {"streaming": streaming}
+@pytest.mark.parametrize("entry", ["stream", "invoke"])
+def test_multiple_choices_rejected_before_sync_request(router, source, entry):
+    # invoke() takes the streaming path only on a streaming=True instance.
+    constructor = {"streaming": True} if entry == "invoke" else {}
     call = {}
     if source == "call":
         call["n"] = 2
@@ -33,17 +34,18 @@ def test_multiple_choices_rejected_before_sync_request(router, source, streaming
         ) as completion,
         pytest.raises(ValueError, match="n must be 1 when streaming"),
     ):
-        list(llm.stream("hi", **call))
+        if entry == "invoke":
+            llm.invoke("hi", **call)
+        else:
+            list(llm.stream("hi", **call))
     completion.assert_not_called()
 
 
 @pytest.mark.parametrize("router", [False, True])
 @pytest.mark.parametrize("source", ["field", "model_kwargs", "call"])
-@pytest.mark.parametrize("streaming", [None, True])
-async def test_multiple_choices_rejected_before_async_request(
-    router, source, streaming
-):
-    constructor = {} if streaming is None else {"streaming": streaming}
+@pytest.mark.parametrize("entry", ["stream", "invoke"])
+async def test_multiple_choices_rejected_before_async_request(router, source, entry):
+    constructor = {"streaming": True} if entry == "invoke" else {}
     call = {}
     if source == "call":
         call["n"] = 2
@@ -66,8 +68,11 @@ async def test_multiple_choices_rejected_before_async_request(
         ) as completion,
         pytest.raises(ValueError, match="n must be 1 when streaming"),
     ):
-        async for _ in llm.astream("hi", **call):
-            pass
+        if entry == "invoke":
+            await llm.ainvoke("hi", **call)
+        else:
+            async for _ in llm.astream("hi", **call):
+                pass
     completion.assert_not_called()
 
 
