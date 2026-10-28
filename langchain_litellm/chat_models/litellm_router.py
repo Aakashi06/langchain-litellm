@@ -34,6 +34,7 @@ from langchain_litellm.chat_models.litellm import (
     _is_claude,
     _keep_reasoning_items,
     _keep_thinking_blocks,
+    _refuses_forced_tools,
     _rejoin_split_reply,
     _response_id_metadata,
     _response_store_key,
@@ -573,6 +574,18 @@ class ChatLiteLLMRouter(ChatLiteLLM):
                     **defaults,
                     **caller,
                 },
+            )
+            for params in (entry.get("litellm_params", {}) for entry in matched)
+        )
+
+    def _model_refuses_forced_tools(self, overrides: Mapping[str, Any]) -> bool:
+        """Answer for the deployments the Router may pick, not the Router alias."""
+        matched = self._group_entries()
+        if not matched:
+            return super()._model_refuses_forced_tools(overrides)
+        return any(
+            _refuses_forced_tools(
+                params.get("model"), params.get("custom_llm_provider")
             )
             for params in (entry.get("litellm_params", {}) for entry in matched)
         )

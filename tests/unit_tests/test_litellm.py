@@ -1594,8 +1594,11 @@ def test_bind_tools_downgraded_wherever_thinking_is_set(
 ) -> None:
     """Each of these turns manual thinking on for the call, so each needs the downgrade."""
     llm = ChatLiteLLM(model=model, api_key="fake", model_kwargs=model_kwargs)
-    with caplog.at_level(
-        logging.WARNING, logger="langchain_litellm.chat_models.litellm"
+    with (
+        patch.object(ChatLiteLLM, "_model_refuses_forced_tools", return_value=False),
+        caplog.at_level(
+            logging.WARNING, logger="langchain_litellm.chat_models.litellm"
+        ),
     ):
         bound = llm.bind_tools([_dummy_tool], tool_choice="required", **bind_kwargs)
     assert bound.kwargs["tool_choice"] == "auto"  # type: ignore[attr-defined]
@@ -1907,6 +1910,312 @@ def test_bind_tools_rejects_a_function_choice_naming_no_bound_function(
         llm.bind_tools(
             tools, tool_choice={"type": "function", "function": {"name": name}}
         )
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        "any",
+        True,
+        "_dummy_tool",
+        {"type": "function", "function": {"name": "_dummy_tool"}},
+        {"type": "required"},
+    ],
+    ids=["required", "any", "true", "name", "function", "required-dict"],
+)
+@pytest.mark.parametrize(
+    "model_kwargs",
+    [
+        {},
+        {"thinking": {"type": "adaptive"}},
+    ],
+    ids=["no-thinking", "adaptive_thinking"],
+)
+def test_bind_tools_downgrades_model_unsupported_forced_choices(
+    tool_choice: str | bool | dict[str, Any],
+    model_kwargs: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """litellm's model map marks Fable 5.1 as refusing any forced tool."""
+    llm = ChatLiteLLM(
+        model="anthropic/claude-fable-5-1",
+        api_key="fake",
+        model_kwargs=model_kwargs,
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="langchain_litellm.chat_models.litellm",
+    ):
+        bound = llm.bind_tools([_dummy_tool], tool_choice=tool_choice)
+
+    assert bound.kwargs["tool_choice"] == "auto"  # type: ignore[attr-defined]
+    assert "unsupported by this model" in caplog.text
+    assert "tool calls may be omitted" in caplog.text
+    assert "incompatible with thinking" not in caplog.text
+
+
+@pytest.mark.parametrize("tool_choice", ["auto", "none", None, False])
+def test_bind_tools_preserves_non_forced_choices_for_unsupported_model(
+    tool_choice: str | bool | None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    llm = ChatLiteLLM(
+        model="anthropic/claude-fable-5-1",
+        api_key="fake",
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="langchain_litellm.chat_models.litellm",
+    ):
+        bound = llm.bind_tools([_dummy_tool], tool_choice=tool_choice)
+
+    assert bound.kwargs["tool_choice"] == tool_choice  # type: ignore[attr-defined]
+    assert "Downgrading tool_choice" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "missing_tool",
+        {"type": "function", "function": {"name": "missing_tool"}},
+    ],
+    ids=["name", "function"],
+)
+def test_bind_tools_validate_tool_before_model_downgrade(
+    tool_choice: str | dict[str, Any],
+) -> None:
+    llm = ChatLiteLLM(
+        model="anthropic/claude-fable-5-1",
+        api_key="fake",
+    )
+
+    with pytest.raises(ValueError, match="missing_tool"):
+        llm.bind_tools([_dummy_tool], tool_choice=tool_choice)
+
+
+@pytest.mark.parametrize(
+    ("constructor_kwargs", "bind_kwargs", "expected"),
+    [
+        ({"model": "anthropic/claude-sonnet-4-5"}, {}, "required"),
+        ({"model": "claude-opus-5-5"}, {}, "auto"),
+        ({"model": "vertex_ai/claude-opus-5-5"}, {}, "auto"),
+        ({"model": "bedrock/us.anthropic.claude-opus-5-5"}, {}, "auto"),
+        ({"model": "litellm_proxy/claude-opus-5-5"}, {}, "auto"),
+        ({"model": "my-org/claude-opus-5-5"}, {}, "required"),
+        (
+            {
+                "model": "databricks-claude-opus-5-5",
+                "custom_llm_provider": "databricks",
+            },
+            {},
+            "auto",
+        ),
+        (
+            {
+                "model": "anthropic/claude-sonnet-4-5",
+                "model_name": "anthropic/claude-fable-5-1",
+            },
+            {},
+            "auto",
+        ),
+        (
+            {
+                "model": "anthropic/claude-sonnet-4-5",
+                "model_kwargs": {"model": "anthropic/claude-fable-5-1"},
+            },
+            {},
+            "auto",
+        ),
+        (
+            {
+                "model": "anthropic/claude-fable-5-1",
+                "model_kwargs": {"model": "anthropic/claude-sonnet-4-5"},
+            },
+            {},
+            "required",
+        ),
+        (
+            {"model": "anthropic/claude-sonnet-4-5"},
+            {"model": "anthropic/claude-fable-5-1"},
+            "auto",
+        ),
+        (
+            {"model": "databricks-claude-opus-5-5"},
+            {"custom_llm_provider": "databricks"},
+            "auto",
+        ),
+    ],
+    ids=[
+        "supported-model",
+        "bare-name",
+        "map-key-with-its-prefix",
+        "bedrock-inference-profile",
+        "provider-prefix",
+        "prefix-litellm-does-not-route",
+        "map-key-under-custom_llm_provider",
+        "model_name",
+        "model_kwargs",
+        "model_kwargs-to-a-supported-model",
+        "binding-override",
+        "bound-custom_llm_provider",
+    ],
+)
+def test_model_forced_tool_capability_uses_effective_model(
+    constructor_kwargs: dict[str, Any],
+    bind_kwargs: dict[str, Any],
+    expected: str,
+) -> None:
+    """Each answer is for the model the call reaches, under each name the map keys."""
+    llm = ChatLiteLLM(api_key="fake", **constructor_kwargs)
+
+    bound = llm.bind_tools([_dummy_tool], tool_choice="required", **bind_kwargs)
+
+    assert bound.kwargs["tool_choice"] == expected  # type: ignore[attr-defined]
+
+
+def test_model_forced_tool_capability_follows_the_alias_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """litellm swaps a model_alias_map alias for its target before it sends."""
+    monkeypatch.setattr(
+        litellm, "model_alias_map", {"fast": "anthropic/claude-fable-5-1"}
+    )
+
+    bound = ChatLiteLLM(model="fast", api_key="fake").bind_tools(
+        [_dummy_tool], tool_choice="required"
+    )
+
+    assert bound.kwargs["tool_choice"] == "auto"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [("team-claude", "required"), ("github_copilot/claude-opus-5-5", "auto")],
+    ids=["name-litellm-cannot-route", "provider-that-logs-in"],
+)
+def test_model_forced_tool_capability_resolves_no_provider(
+    model: str, expected: str
+) -> None:
+    """litellm's provider lookup never runs for this check.
+
+    It prints a banner for a name it cannot route, and logs in to some providers.
+    """
+    llm = ChatLiteLLM(model=model, api_key="fake")
+
+    with patch.object(
+        litellm, "get_llm_provider", side_effect=AssertionError("resolved")
+    ):
+        bound = llm.bind_tools([_dummy_tool], tool_choice="required")
+
+    assert bound.kwargs["tool_choice"] == expected  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "model_kwargs",
+    [
+        {},
+        {"thinking": {"type": "adaptive"}},
+    ],
+    ids=["non-thinking", "adaptive-thinking"],
+)
+@pytest.mark.parametrize("schema_kind", ["pydantic", "dict"])
+@pytest.mark.parametrize("has_tool_call", [True, False])
+@pytest.mark.parametrize("include_raw", [True, False])
+def test_structured_output_handles_model_without_forced_tools(
+    model_kwargs: dict[str, Any],
+    schema_kind: str,
+    has_tool_call: bool,
+    include_raw: bool,
+) -> None:
+    bind_kwargs: dict[str, Any] = {}
+
+    raw_message = AIMessage(
+        content="" if has_tool_call else "plain text",
+        tool_calls=(
+            [
+                {
+                    "name": "_StructuredResponse",
+                    "args": {"value": "ok"},
+                    "id": "call_test",
+                    "type": "tool_call",
+                }
+            ]
+            if has_tool_call
+            else []
+        ),
+    )
+
+    class _FakeChatLiteLLM(ChatLiteLLM):
+        def bind_tools(self, tools: Any, **kwargs: Any) -> Any:  # type: ignore[override]
+            bind_kwargs.update(kwargs)
+            return RunnableLambda(lambda _: raw_message)
+
+    schema: Any = _StructuredResponse
+    if schema_kind == "dict":
+        schema = {
+            "type": "function",
+            "function": {
+                "name": "_StructuredResponse",
+                "description": "Return the requested value.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                },
+            },
+        }
+
+    llm = _FakeChatLiteLLM(
+        model="anthropic/claude-fable-5-1",
+        api_key="fake",
+        model_kwargs=model_kwargs,
+    )
+
+    with pytest.warns(
+        UserWarning,
+        match="does not support forced tool use",
+    ) as caught:
+        structured = llm.with_structured_output(
+            schema,
+            method="function_calling",
+            include_raw=include_raw,
+        )
+
+    assert "tool_choice" not in bind_kwargs
+    assert "disabling `thinking`" not in str(caught[0].message)
+
+    if not has_tool_call and not include_raw:
+        with pytest.raises(
+            OutputParserException,
+            match="no tool call is returned",
+        ):
+            structured.invoke("Return structured output.")
+        return
+
+    result = structured.invoke("Return structured output.")
+
+    if include_raw:
+        assert isinstance(result, dict)
+        assert result["raw"] is raw_message
+
+        if not has_tool_call:
+            assert result["parsed"] is None
+            assert isinstance(result["parsing_error"], OutputParserException)
+            return
+
+        assert result["parsing_error"] is None
+        parsed = result["parsed"]
+    else:
+        parsed = result
+
+    if schema_kind == "pydantic":
+        assert isinstance(parsed, _StructuredResponse)
+        assert parsed.value == "ok"
+    else:
+        assert parsed == {"value": "ok"}
 
 
 @pytest.mark.parametrize(
